@@ -218,6 +218,32 @@ def render_metric_card(label: str, ticker: str, name: str, ret: float):
     """, unsafe_allow_html=True)
 
 
+def render_ranked_list(label: str, items: list[tuple[str, str, float]], positive: bool):
+    """Render a ranked top/bottom list card. items = [(ticker, name, return), ...]"""
+    badge = "badge-pos" if positive else "badge-neg"
+    rows_html = ""
+    for rank, (ticker, name, ret) in enumerate(items, 1):
+        sign = "+" if ret >= 0 else ""
+        rows_html += f"""
+        <div style="display:flex; align-items:center; justify-content:space-between;
+                    padding: 0.45rem 0; border-bottom: 1px solid #2a2f3e;">
+            <div style="display:flex; align-items:center; gap:0.7rem;">
+                <span style="color:#8b95a8; font-size:0.75rem; width:1rem;">#{rank}</span>
+                <div>
+                    <div style="font-weight:700; color:#fff; font-size:0.95rem;">{ticker}</div>
+                    <div style="color:#8b95a8; font-size:0.72rem;">{name}</div>
+                </div>
+            </div>
+            <span class="{badge}">{sign}{ret*100:.2f}%</span>
+        </div>"""
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="card-label" style="margin-bottom:0.5rem;">{label}</div>
+        {rows_html}
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 watchlist = load_watchlist()
@@ -266,19 +292,22 @@ with col_b:
 with col_w:
     render_metric_card("Worst stock", returns.idxmin(), ticker_name.get(returns.idxmin(), ""), returns.min())
 
-# ── BEST / WORST BY SECURITY TYPE ────────────────────────────────────────────
-st.markdown('<p class="section-title">Best &amp; worst by security type</p>', unsafe_allow_html=True)
+# ── TOP 3 / BOTTOM 3 BY SECURITY TYPE ────────────────────────────────────────
+st.markdown('<p class="section-title">Top &amp; bottom 3 by security type</p>', unsafe_allow_html=True)
+N = 3
 for stype in list(dict.fromkeys(type_map.get(t, "") for t in tickers_list)):
     tickers_in = [t for t in tickers_list if type_map.get(t) == stype]
     if not tickers_in:
         continue
-    tr = returns[tickers_in]
+    tr = returns[tickers_in].sort_values(ascending=False)
+    top = [(t, ticker_name.get(t, ""), tr[t]) for t in tr.head(N).index]
+    bottom = [(t, ticker_name.get(t, ""), tr[t]) for t in tr.tail(N).index[::-1]]
     st.markdown(f"**{stype}**")
     c1, c2 = st.columns(2)
     with c1:
-        render_metric_card("Best", tr.idxmax(), ticker_name.get(tr.idxmax(), ""), tr.max())
+        render_ranked_list(f"Top {min(N, len(tickers_in))}", top, positive=True)
     with c2:
-        render_metric_card("Worst", tr.idxmin(), ticker_name.get(tr.idxmin(), ""), tr.min())
+        render_ranked_list(f"Bottom {min(N, len(tickers_in))}", bottom, positive=False)
 
 # ── GROUPED PERFORMANCE BY TYPE ───────────────────────────────────────────────
 st.markdown('<p class="section-title">Cumulative performance by security type</p>', unsafe_allow_html=True)
