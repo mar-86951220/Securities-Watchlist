@@ -1,4 +1,5 @@
 .streamlit/secrets.toml
+Watchlist.xlsx
 __pycache__/
 *.pyc
 .env

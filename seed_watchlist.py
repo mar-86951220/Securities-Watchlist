@@ -12,7 +12,7 @@ import psycopg2
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SECRETS_PATH = os.path.join(SCRIPT_DIR, ".streamlit", "secrets.toml")
-EXCEL_PATH = r"c:\Users\lenovo\OneDrive\Financial Analysis\Investment Ideas\Stock Trading\Watchlist App\Watchlist.xlsx"
+EXCEL_PATH = os.path.join(SCRIPT_DIR, "Watchlist.xlsx")
 
 
 def load_db_url() -> str:
