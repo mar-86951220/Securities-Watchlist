@@ -219,29 +219,27 @@ def render_metric_card(label: str, ticker: str, name: str, ret: float):
 
 
 def render_ranked_list(label: str, items: list[tuple[str, str, float]], positive: bool):
-    """Render a ranked top/bottom list card. items = [(ticker, name, return), ...]"""
     badge = "badge-pos" if positive else "badge-neg"
-    rows_html = ""
+    rows = []
     for rank, (ticker, name, ret) in enumerate(items, 1):
         sign = "+" if ret >= 0 else ""
-        rows_html += f"""
-        <div style="display:flex; align-items:center; justify-content:space-between;
-                    padding: 0.45rem 0; border-bottom: 1px solid #2a2f3e;">
-            <div style="display:flex; align-items:center; gap:0.7rem;">
-                <span style="color:#8b95a8; font-size:0.75rem; width:1rem;">#{rank}</span>
-                <div>
-                    <div style="font-weight:700; color:#fff; font-size:0.95rem;">{ticker}</div>
-                    <div style="color:#8b95a8; font-size:0.72rem;">{name}</div>
-                </div>
-            </div>
-            <span class="{badge}">{sign}{ret*100:.2f}%</span>
-        </div>"""
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="card-label" style="margin-bottom:0.5rem;">{label}</div>
-        {rows_html}
-    </div>
-    """, unsafe_allow_html=True)
+        rows.append(
+            f'<div style="display:flex;align-items:center;justify-content:space-between;padding:0.45rem 0;border-bottom:1px solid #2a2f3e;">'
+            f'<div style="display:flex;align-items:center;gap:0.7rem;">'
+            f'<span style="color:#8b95a8;font-size:0.75rem;min-width:1rem;">#{rank}</span>'
+            f'<div><div style="font-weight:700;color:#fff;font-size:0.95rem;">{ticker}</div>'
+            f'<div style="color:#8b95a8;font-size:0.72rem;">{name}</div></div>'
+            f'</div>'
+            f'<span class="{badge}">{sign}{ret*100:.2f}%</span>'
+            f'</div>'
+        )
+    html = (
+        f'<div class="metric-card">'
+        f'<div class="card-label" style="margin-bottom:0.5rem;">{label}</div>'
+        + "".join(rows) +
+        f'</div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
