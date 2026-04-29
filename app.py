@@ -130,7 +130,7 @@ def plot_normalized_chart(normalized: pd.DataFrame, focus: str | None = None) ->
         bgcolor="rgba(0,0,0,0)", font=dict(size=9 if n > 20 else 10),
         orientation="v", x=1.01,
     )
-    layout["hovermode"] = "x unified"
+    layout["hovermode"] = "closest"
     fig.update_layout(**layout)
     return fig
 
