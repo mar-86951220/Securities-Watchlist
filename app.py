@@ -102,14 +102,35 @@ def base_layout(title="", height=300):
     )
 
 
-def plot_normalized_chart(normalized: pd.DataFrame) -> go.Figure:
+def plot_normalized_chart(normalized: pd.DataFrame, focus: str | None = None) -> go.Figure:
+    n = len(normalized.columns)
+    # Adaptive styling: thin + semi-transparent when crowded
+    if n <= 6:
+        default_width, default_opacity = 1.8, 1.0
+    elif n <= 15:
+        default_width, default_opacity = 1.2, 0.75
+    else:
+        default_width, default_opacity = 0.8, 0.45
+
     fig = go.Figure()
     for col in normalized.columns:
-        fig.add_trace(go.Scatter(x=normalized.index, y=normalized[col], mode="lines", name=col, line=dict(width=1.5)))
-    layout = base_layout(height=380)
+        if focus and focus != col:
+            width, opacity = 0.7, 0.15
+        else:
+            width, opacity = (2.5, 1.0) if focus == col else (default_width, default_opacity)
+        fig.add_trace(go.Scatter(
+            x=normalized.index, y=normalized[col], mode="lines", name=col,
+            opacity=opacity, line=dict(width=width),
+        ))
+
+    layout = base_layout(height=420)
     layout["yaxis"]["title"] = "Normalized price"
     layout["xaxis"]["title"] = "Date"
-    layout["legend"] = dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10), orientation="v", x=1.01)
+    layout["legend"] = dict(
+        bgcolor="rgba(0,0,0,0)", font=dict(size=9 if n > 20 else 10),
+        orientation="v", x=1.01,
+    )
+    layout["hovermode"] = "x unified"
     fig.update_layout(**layout)
     return fig
 
@@ -252,12 +273,43 @@ type_map = watchlist.set_index("Ticker")["SecurityType"].to_dict()
 st.markdown("# 📈 Watchlist peer analysis")
 st.markdown('<p class="section-subtitle">Compare securities against others in their peer group.</p>', unsafe_allow_html=True)
 
+# ── SESSION STATE ─────────────────────────────────────────────────────────────
+if "sel_tickers" not in st.session_state:
+    st.session_state.sel_tickers = all_tickers[:7]
+
+# ── QUICK FILTERS ─────────────────────────────────────────────────────────────
+types_present = sorted({type_map[t] for t in all_tickers if t in type_map})
+btn_cols = st.columns([1, 1] + [1] * len(types_present) + [1])
+with btn_cols[0]:
+    if st.button("✕ Clear", use_container_width=True):
+        st.session_state.sel_tickers = []
+        st.rerun()
+with btn_cols[1]:
+    if st.button("★ All", use_container_width=True):
+        st.session_state.sel_tickers = all_tickers
+        st.rerun()
+for i, stype in enumerate(types_present):
+    short = {"Common Stock": "Stocks", "ETF": "ETFs", "Commodity ETF/Trust": "Commodities"}.get(stype, stype)
+    with btn_cols[2 + i]:
+        if st.button(short, use_container_width=True):
+            st.session_state.sel_tickers = [t for t in all_tickers if type_map.get(t) == stype]
+            st.rerun()
+with btn_cols[-1]:
+    if st.button("↑ Top 10", use_container_width=True):
+        st.session_state.sel_tickers = all_tickers  # pre-select all; ranking filters after fetch
+        st.session_state.filter_top10 = True
+        st.rerun()
+
+# ── TICKER MULTISELECT + TIME HORIZON ─────────────────────────────────────────
 col_tickers, col_period = st.columns([3, 1])
 with col_tickers:
     selected = st.multiselect(
-        "Stock tickers", options=all_tickers, default=all_tickers[:7],
+        "Stock tickers", options=all_tickers,
+        default=[t for t in st.session_state.sel_tickers if t in all_tickers],
         format_func=lambda t: f"{t} – {ticker_name.get(t, '')}",
+        key="ticker_ms",
     )
+    st.session_state.sel_tickers = selected
 with col_period:
     period = st.radio("Time horizon", ["1M", "3M", "6M", "1Y", "3Y", "5Y", "10Y"], index=2, horizontal=True)
 
@@ -279,8 +331,29 @@ normalized = normalize_prices(prices)
 returns = compute_returns(normalized)
 tickers_list = list(prices.columns)
 
+# Apply Top 10 filter after we have returns
+if st.session_state.get("filter_top10"):
+    top10 = returns.nlargest(10).index.tolist()
+    st.session_state.sel_tickers = top10
+    st.session_state.filter_top10 = False
+    st.rerun()
+
 # ── NORMALIZED PRICE CHART ────────────────────────────────────────────────────
-st.plotly_chart(plot_normalized_chart(normalized), use_container_width=True)
+n_selected = len(tickers_list)
+chart_col, ctrl_col = st.columns([5, 1])
+with ctrl_col:
+    st.markdown("<br>", unsafe_allow_html=True)
+    focus = st.selectbox(
+        "Highlight ticker",
+        options=["— none —"] + tickers_list,
+        index=0,
+        help="Dim all other lines to focus on one ticker",
+    )
+    focus_ticker = None if focus == "— none —" else focus
+with chart_col:
+    if n_selected > 15:
+        st.caption(f"{n_selected} tickers selected — lines dimmed for readability. Use **Highlight ticker** to focus on one.")
+    st.plotly_chart(plot_normalized_chart(normalized, focus=focus_ticker), use_container_width=True)
 
 # ── BEST / WORST OVERALL ──────────────────────────────────────────────────────
 st.markdown('<p class="section-title">Best &amp; worst performers</p>', unsafe_allow_html=True)
@@ -315,14 +388,22 @@ st.plotly_chart(plot_type_performance(normalized, watchlist), use_container_widt
 # ── INDIVIDUAL STOCK vs PEER AVERAGE ─────────────────────────────────────────
 st.markdown('<p class="section-title">Individual stocks vs peer average</p>', unsafe_allow_html=True)
 st.markdown('<p class="section-subtitle">The peer average when analyzing stock X always excludes X itself.</p>', unsafe_allow_html=True)
-for i in range(0, len(tickers_list), 2):
-    cols = st.columns(4)
-    for j, ticker in enumerate(tickers_list[i:i+2]):
-        fig_ov, fig_dl = plot_peer_comparison(normalized, ticker)
-        with cols[j * 2]:
-            st.plotly_chart(fig_ov, use_container_width=True)
-        with cols[j * 2 + 1]:
-            st.plotly_chart(fig_dl, use_container_width=True)
+
+def _render_individual_charts(tickers_list, normalized):
+    for i in range(0, len(tickers_list), 2):
+        cols = st.columns(4)
+        for j, ticker in enumerate(tickers_list[i:i+2]):
+            fig_ov, fig_dl = plot_peer_comparison(normalized, ticker)
+            with cols[j * 2]:
+                st.plotly_chart(fig_ov, use_container_width=True)
+            with cols[j * 2 + 1]:
+                st.plotly_chart(fig_dl, use_container_width=True)
+
+if n_selected > 10:
+    with st.expander(f"Show individual charts ({n_selected} tickers)", expanded=False):
+        _render_individual_charts(tickers_list, normalized)
+else:
+    _render_individual_charts(tickers_list, normalized)
 
 # ── RETURN RANKINGS TABLE ─────────────────────────────────────────────────────
 st.markdown('<p class="section-title">Return rankings</p>', unsafe_allow_html=True)
