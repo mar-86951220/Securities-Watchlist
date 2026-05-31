@@ -47,22 +47,32 @@ def get_db_url() -> str:
 
 @st.cache_data(ttl=300)
 def load_watchlist() -> pd.DataFrame:
+    # Use a raw cursor rather than pd.read_sql: pandas only officially supports
+    # SQLAlchemy connections and warns (or breaks) on a bare psycopg2 connection.
     conn = psycopg2.connect(get_db_url())
-    df = pd.read_sql("SELECT ticker, name, security_type AS \"SecurityType\" FROM watchlist ORDER BY ticker", conn)
-    conn.close()
-    df.columns = ["Ticker", "Name", "SecurityType"]
-    return df
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ticker, name, security_type FROM watchlist ORDER BY ticker")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return pd.DataFrame(rows, columns=["Ticker", "Name", "SecurityType"])
 
 
 @st.cache_data(ttl=3600)
 def fetch_prices(tickers: tuple, start: str, end: str) -> pd.DataFrame:
     raw = yf.download(list(tickers), start=start, end=end, auto_adjust=True, progress=False)
+    if raw.empty:
+        return pd.DataFrame()
     if isinstance(raw.columns, pd.MultiIndex):
         prices = raw["Close"]
     else:
-        prices = raw[["Close"]]
+        # Single-ticker download returns a flat column index.
+        prices = raw[["Close"]] if "Close" in raw.columns else raw
         prices.columns = [tickers[0]]
-    return prices.dropna(how="all")
+    # Drop rows that are entirely empty, then columns for tickers that returned
+    # no data at all (delisted / bad symbol) so they surface as "missing".
+    return prices.dropna(how="all").dropna(axis=1, how="all")
 
 
 def normalize_prices(prices: pd.DataFrame) -> pd.DataFrame:
@@ -274,42 +284,51 @@ st.markdown("# 📈 Watchlist peer analysis")
 st.markdown('<p class="section-subtitle">Compare securities against others in their peer group.</p>', unsafe_allow_html=True)
 
 # ── SESSION STATE ─────────────────────────────────────────────────────────────
-if "sel_tickers" not in st.session_state:
-    st.session_state.sel_tickers = all_tickers[:7]
+# `ticker_ms` (the multiselect's widget key) is the single source of truth for
+# the selection. A widget bound to a key ignores its `default=` once the key
+# exists in session_state, so quick-filter buttons must mutate that key — not a
+# separate variable — to take effect. Programmatic changes are staged in
+# `_pending_tickers` and applied here, BEFORE the widget is instantiated, since
+# a widget-keyed value cannot be reassigned after the widget renders.
+if "ticker_ms" not in st.session_state:
+    st.session_state.ticker_ms = all_tickers[:7]
+if "_pending_tickers" in st.session_state:
+    st.session_state.ticker_ms = [t for t in st.session_state.pop("_pending_tickers") if t in all_tickers]
+
+
+def request_selection(tickers: list[str], top10: bool = False):
+    """Stage a new selection and rerun so it is applied before the widget renders."""
+    st.session_state._pending_tickers = tickers
+    st.session_state.filter_top10 = top10
+    st.rerun()
+
 
 # ── QUICK FILTERS ─────────────────────────────────────────────────────────────
 types_present = sorted({type_map[t] for t in all_tickers if t in type_map})
 btn_cols = st.columns([1, 1] + [1] * len(types_present) + [1])
 with btn_cols[0]:
     if st.button("✕ Clear", use_container_width=True):
-        st.session_state.sel_tickers = []
-        st.rerun()
+        request_selection([])
 with btn_cols[1]:
     if st.button("★ All", use_container_width=True):
-        st.session_state.sel_tickers = all_tickers
-        st.rerun()
+        request_selection(all_tickers)
 for i, stype in enumerate(types_present):
     short = {"Common Stock": "Stocks", "ETF": "ETFs", "Commodity ETF/Trust": "Commodities"}.get(stype, stype)
     with btn_cols[2 + i]:
         if st.button(short, use_container_width=True):
-            st.session_state.sel_tickers = [t for t in all_tickers if type_map.get(t) == stype]
-            st.rerun()
+            request_selection([t for t in all_tickers if type_map.get(t) == stype])
 with btn_cols[-1]:
     if st.button("↑ Top 10", use_container_width=True):
-        st.session_state.sel_tickers = all_tickers  # pre-select all; ranking filters after fetch
-        st.session_state.filter_top10 = True
-        st.rerun()
+        request_selection(all_tickers, top10=True)  # pre-select all; ranking filters after fetch
 
 # ── TICKER MULTISELECT + TIME HORIZON ─────────────────────────────────────────
 col_tickers, col_period = st.columns([3, 1])
 with col_tickers:
     selected = st.multiselect(
         "Stock tickers", options=all_tickers,
-        default=[t for t in st.session_state.sel_tickers if t in all_tickers],
         format_func=lambda t: f"{t} – {ticker_name.get(t, '')}",
         key="ticker_ms",
     )
-    st.session_state.sel_tickers = selected
 with col_period:
     period = st.radio("Time horizon", ["1M", "3M", "6M", "1Y", "3Y", "5Y", "10Y"], index=2, horizontal=True)
 
@@ -322,21 +341,26 @@ start_date, end_date = period_to_dates(period)
 with st.spinner("Fetching price data…"):
     prices = fetch_prices(tuple(sorted(selected)), start_date, end_date)
 
+# Keep only tickers that actually returned data, preserving selection order.
 prices = prices.reindex(columns=[t for t in selected if t in prices.columns])
 missing = [t for t in selected if t not in prices.columns]
 if missing:
     st.warning(f"No data found for: {', '.join(missing)}. They will be excluded.")
 
+if prices.shape[1] < 2:
+    st.error("Fewer than 2 of the selected tickers returned price data — cannot build a peer comparison. "
+             "Try a different time horizon or other tickers.")
+    st.stop()
+
 normalized = normalize_prices(prices)
 returns = compute_returns(normalized)
 tickers_list = list(prices.columns)
 
-# Apply Top 10 filter after we have returns
+# Apply Top 10 filter now that returns are known. request_selection stages the
+# reselection (and clears filter_top10) so it is applied on the next run before
+# the widget renders.
 if st.session_state.get("filter_top10"):
-    top10 = returns.nlargest(10).index.tolist()
-    st.session_state.sel_tickers = top10
-    st.session_state.filter_top10 = False
-    st.rerun()
+    request_selection(returns.nlargest(10).index.tolist())
 
 # ── NORMALIZED PRICE CHART ────────────────────────────────────────────────────
 n_selected = len(tickers_list)
@@ -371,14 +395,19 @@ for stype in list(dict.fromkeys(type_map.get(t, "") for t in tickers_list)):
     if not tickers_in:
         continue
     tr = returns[tickers_in].sort_values(ascending=False)
-    top = [(t, ticker_name.get(t, ""), tr[t]) for t in tr.head(N).index]
-    bottom = [(t, ticker_name.get(t, ""), tr[t]) for t in tr.tail(N).index[::-1]]
+    top_idx = list(tr.head(N).index)
+    # Exclude tickers already shown in the top list so small groups (< 2N) don't
+    # render the same names in both columns.
+    bottom_idx = [t for t in reversed(tr.tail(N).index) if t not in top_idx]
+    top = [(t, ticker_name.get(t, ""), tr[t]) for t in top_idx]
+    bottom = [(t, ticker_name.get(t, ""), tr[t]) for t in bottom_idx]
     st.markdown(f"**{stype}**")
     c1, c2 = st.columns(2)
     with c1:
-        render_ranked_list(f"Top {min(N, len(tickers_in))}", top, positive=True)
+        render_ranked_list(f"Top {len(top)}", top, positive=True)
     with c2:
-        render_ranked_list(f"Bottom {min(N, len(tickers_in))}", bottom, positive=False)
+        if bottom:
+            render_ranked_list(f"Bottom {len(bottom)}", bottom, positive=False)
 
 # ── GROUPED PERFORMANCE BY TYPE ───────────────────────────────────────────────
 st.markdown('<p class="section-title">Cumulative performance by security type</p>', unsafe_allow_html=True)
@@ -407,7 +436,6 @@ else:
 
 # ── RETURN RANKINGS TABLE ─────────────────────────────────────────────────────
 st.markdown('<p class="section-title">Return rankings</p>', unsafe_allow_html=True)
-peer_avg_overall = returns.mean()
 rankings = [{
     "Ticker": t, "Name": ticker_name.get(t, ""), "Type": type_map.get(t, ""),
     "Period Return %": round(returns[t] * 100, 2),
